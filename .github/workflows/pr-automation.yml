@@ -1,0 +1,360 @@
+name: Pull Request Automation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  code-quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    outputs:
+      eslint-result: ${{ steps.eslint.outputs.result }}
+      prettier-result: ${{ steps.prettier.outputs.result }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        id: eslint
+        run: |
+          echo "Running ESLint checks..."
+          if npm run lint; then
+            echo "result=success" >> $GITHUB_OUTPUT
+            echo "ESLint checks passed ✅"
+          else
+            echo "result=failure" >> $GITHUB_OUTPUT
+            echo "ESLint checks failed ❌"
+            exit 1
+          fi
+
+      - name: Run Prettier formatting check
+        id: prettier
+        run: |
+          echo "Running Prettier formatting checks..."
+          if npx prettier --check "src/**/*.js"; then
+            echo "result=success" >> $GITHUB_OUTPUT
+            echo "Prettier formatting checks passed ✅"
+          else
+            echo "result=failure" >> $GITHUB_OUTPUT
+            echo "Prettier formatting checks failed ❌"
+            exit 1
+          fi
+
+      - name: Post Code Quality Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const eslintResult = '${{ steps.eslint.outputs.result }}';
+            const prettierResult = '${{ steps.prettier.outputs.result }}';
+            
+            const eslintIcon = eslintResult === 'success' ? '✅' : '❌';
+            const prettierIcon = prettierResult === 'success' ? '✅' : '❌';
+            
+            const comment = `## 📊 Code Quality Report
+            
+            ### ESLint Status: ${eslintIcon}
+            ${eslintResult === 'success' ? 'No linting errors found.' : 'Linting errors detected. Please fix before merging.'}
+            
+            ### Prettier Status: ${prettierIcon}
+            ${prettierResult === 'success' ? 'Code formatting is consistent.' : 'Code formatting issues detected. Please run prettier to fix.'}
+            
+            ---
+            *This report was generated automatically by the Code Quality workflow.*`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+  testing-suite:
+    name: Testing Suite
+    runs-on: ubuntu-latest
+    outputs:
+      test-result: ${{ steps.tests.outputs.result }}
+      coverage-percentage: ${{ steps.coverage.outputs.percentage }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests with coverage
+        id: tests
+        run: |
+          echo "Running test suite with coverage..."
+          if npm run test:coverage; then
+            echo "result=success" >> $GITHUB_OUTPUT
+            echo "Test suite passed ✅"
+          else
+            echo "result=failure" >> $GITHUB_OUTPUT
+            echo "Test suite failed ❌"
+            exit 1
+          fi
+
+      - name: Extract coverage percentage
+        id: coverage
+        run: |
+          if [ -f "coverage/coverage-summary.json" ]; then
+            COVERAGE=$(node -e "console.log(JSON.parse(require('fs').readFileSync('coverage/coverage-summary.json', 'utf8')).total.lines.pct)")
+            echo "percentage=$COVERAGE" >> $GITHUB_OUTPUT
+            echo "Coverage percentage: $COVERAGE%"
+          else
+            echo "percentage=0" >> $GITHUB_OUTPUT
+            echo "Coverage report not found"
+          fi
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report-${{ github.run_number }}
+          path: coverage/
+          retention-days: 30
+
+      - name: Post Test Coverage Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const testResult = '${{ steps.tests.outputs.result }}';
+            const coveragePercentage = '${{ steps.coverage.outputs.percentage }}';
+            
+            const testIcon = testResult === 'success' ? '✅' : '❌';
+            const coverageIcon = parseFloat(coveragePercentage) >= 70 ? '✅' : '⚠️';
+            
+            const comment = `## 🧪 Test Coverage Report
+            
+            ### Test Status: ${testIcon}
+            ${testResult === 'success' ? 'All tests passed successfully.' : 'Some tests failed. Please review and fix.'}
+            
+            ### Coverage: ${coverageIcon} ${coveragePercentage}%
+            ${parseFloat(coveragePercentage) >= 70 ? 'Coverage threshold met (≥70%).' : 'Coverage below threshold (70%). Consider adding more tests.'}
+            
+            ---
+            *This report was generated automatically by the Testing Suite workflow.*`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    outputs:
+      vulnerability-result: ${{ steps.vulnerability.outputs.result }}
+      secrets-result: ${{ steps.secrets.outputs.result }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run dependency vulnerability audit
+        id: vulnerability
+        run: |
+          echo "Running dependency vulnerability audit..."
+          if npm audit --audit-level=moderate; then
+            echo "result=success" >> $GITHUB_OUTPUT
+            echo "No vulnerabilities found ✅"
+          else
+            echo "result=warning" >> $GITHUB_OUTPUT
+            echo "Vulnerabilities found ⚠️"
+          fi
+
+      - name: Scan for secrets in code changes
+        id: secrets
+        run: |
+          echo "Scanning for secrets in code changes..."
+          # Basic secret detection patterns
+          PATTERNS=(
+            "password\s*=\s*['\"][^'\"]+['\"]"
+            "api_key\s*=\s*['\"][^'\"]+['\"]"
+            "secret\s*=\s*['\"][^'\"]+['\"]"
+            "token\s*=\s*['\"][^'\"]+['\"]"
+            "AKIA[0-9A-Z]{16}"  # AWS access key pattern
+            "ghp_[a-zA-Z0-9]{36}"  # GitHub personal access token
+          )
+          
+          SECRETS_FOUND=false
+          for pattern in "${PATTERNS[@]}"; do
+            if git diff --name-only HEAD~1 HEAD | xargs grep -E "$pattern" 2>/dev/null; then
+              SECRETS_FOUND=true
+              echo "Potential secret found with pattern: $pattern"
+            fi
+          done
+          
+          if [ "$SECRETS_FOUND" = true ]; then
+            echo "result=failure" >> $GITHUB_OUTPUT
+            echo "Potential secrets detected ❌"
+            exit 1
+          else
+            echo "result=success" >> $GITHUB_OUTPUT
+            echo "No secrets detected ✅"
+          fi
+
+      - name: Post Security Scan Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const vulnResult = '${{ steps.vulnerability.outputs.result }}';
+            const secretsResult = '${{ steps.secrets.outputs.result }}';
+            
+            const vulnIcon = vulnResult === 'success' ? '✅' : vulnResult === 'warning' ? '⚠️' : '❌';
+            const secretsIcon = secretsResult === 'success' ? '✅' : '❌';
+            
+            const vulnMessage = vulnResult === 'success' ? 'No vulnerabilities found in dependencies.' : 
+                               vulnResult === 'warning' ? 'Vulnerabilities found in dependencies. Review and update.' : 
+                               'Critical vulnerabilities detected. Immediate action required.';
+            
+            const secretsMessage = secretsResult === 'success' ? 'No secrets detected in code changes.' : 
+                                  'Potential secrets detected in code changes. Please remove before merging.';
+            
+            const comment = `## 🔒 Security Scan Report
+            
+            ### Dependencies: ${vulnIcon}
+            ${vulnMessage}
+            
+            ### Secrets Detection: ${secretsIcon}
+            ${secretsMessage}
+            
+            ---
+            *This report was generated automatically by the Security Scan workflow.*`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+  build-validation:
+    name: Build Validation
+    runs-on: ubuntu-latest
+    outputs:
+      build-result: ${{ steps.build.outputs.result }}
+      health-result: ${{ steps.health.outputs.result }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        id: build
+        run: |
+          echo "Building application..."
+          if npm run build; then
+            echo "result=success" >> $GITHUB_OUTPUT
+            echo "Build completed successfully ✅"
+          else
+            echo "result=failure" >> $GITHUB_OUTPUT
+            echo "Build failed ❌"
+            exit 1
+          fi
+
+      - name: Start application for health check
+        run: |
+          echo "Starting application..."
+          npm start &
+          sleep 10  # Wait for application to start
+
+      - name: Validate endpoints are accessible
+        id: health
+        run: |
+          echo "Validating application endpoints..."
+          
+          # Check if main endpoint is accessible
+          if curl -f http://localhost:3000/health > /dev/null 2>&1; then
+            echo "result=success" >> $GITHUB_OUTPUT
+            echo "Health endpoint accessible ✅"
+          else
+            echo "result=failure" >> $GITHUB_OUTPUT
+            echo "Health endpoint not accessible ❌"
+          fi
+          
+          # Check if application is responding
+          if curl -f http://localhost:3000/ > /dev/null 2>&1; then
+            echo "Main endpoint accessible ✅"
+          else
+            echo "Main endpoint not accessible ⚠️"
+          fi
+
+      - name: Create deployment preview artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-artifacts-${{ github.run_number }}
+          path: |
+            src/
+            package.json
+            package-lock.json
+          retention-days: 7
+
+      - name: Post Build Validation Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const buildResult = '${{ steps.build.outputs.result }}';
+            const healthResult = '${{ steps.health.outputs.result }}';
+            
+            const buildIcon = buildResult === 'success' ? '✅' : '❌';
+            const healthIcon = healthResult === 'success' ? '✅' : '❌';
+            
+            const buildMessage = buildResult === 'success' ? 'Application built successfully.' : 'Build failed. Please check build logs.';
+            const healthMessage = healthResult === 'success' ? 'All endpoints are accessible and responding.' : 'Some endpoints are not accessible. Please review application configuration.';
+            
+            const comment = `## 🏗️ Build Validation
+            
+            ### Build Status: ${buildIcon}
+            ${buildMessage}
+            
+            ### Endpoint Validation: ${healthIcon}
+            ${healthMessage}
+            
+            ### Deployment Preview
+            Build artifacts have been created and are available for review.
+            
+            ---
+            *This report was generated automatically by the Build Validation workflow.*`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
